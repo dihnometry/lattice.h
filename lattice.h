@@ -1,6 +1,9 @@
 #include <stdlib.h>
 
 #define ARENA_SIZE 1024*1024 // 1 MB
+#define SB_INIT_CAPACITY 16
+
+#define GROWTH_FACTOR 2
 
 typedef struct {
     char *memory;
@@ -31,6 +34,7 @@ typedef struct {
     size_t count;
 } String_View;
 
+String_View sv_from_cstr(const char *data);
 String_View sv_trim_left(String_View sv);
 String_View sv_trim_right(String_View sv);
 String_View sv_trim(String_View sv);
@@ -39,10 +43,12 @@ String_View sv_chop_by_delim(String_View *sv, char delim);
 #define SV_Fmt "%.*s"
 #define SV_Arg(sv) (int) (sv).count, (sv).data
 
+#define LATTICE_IMPLEMENTATION
 #ifdef LATTICE_IMPLEMENTATION
 
 #include <stdio.h>
 #include <ctype.h>
+#include <string.h>
 
 // ------------------------------------------
 // |     Arena Allocator Implementation     |
@@ -60,13 +66,14 @@ Arena arena_create(size_t size)
 
 void arena_delete(Arena *arena)
 {
-    free(arena);
+    free(arena->memory);
 }
 
 // TODO: Make capacity grow when reaching limit
 void *arena_push(Arena *arena, size_t size)
 {
-    size_t padding = arena->position % size;
+    size_t align = sizeof(void*);
+    size_t padding = (align - (arena->position % align)) % align;
     arena->position += padding;
 
     if (arena->position + size > arena->capacity) {
@@ -90,29 +97,125 @@ void arena_clear(Arena *arena)
 // |     String Builder Implementation     |
 // -----------------------------------------
 
+// Grow the capacity of sb until it can fit n
+void sb_grow_until(String_Builder *sb, size_t n)
+{
+    if (sb->count + n > sb->capacity) {
+        size_t new_capacity = sb->capacity ? sb->capacity : SB_INIT_CAPACITY;
+        while (sb->count + n > new_capacity) {
+            // TODO: check for possible overflow
+            new_capacity *= GROWTH_FACTOR;
+        }
+
+        // TODO: check if realloc fails
+        char *new_content = (char*)realloc(sb->content, new_capacity);
+        sb->content = new_content;
+        sb->capacity = new_capacity;
+    }
+}
+
 void sb_append(String_Builder *sb, char *s)
 {
-    return;
+    if (sb->capacity == 0) {
+        sb->capacity = SB_INIT_CAPACITY;
+        // TODO: check if malloc fails
+        sb->content = (char*)malloc(sb->capacity);
+    }
+
+    size_t len = strlen(s);
+    sb_grow_until(sb, len);
+
+    memcpy(&sb->content[sb->count], s, len);
+    sb->count += len;
+    sb->content[sb->count] = '\0';
 }
 
 void sb_insert(String_Builder *sb, size_t index, char *s)
 {
-    return;
+    if (index >= sb->count) {
+        printf("ERROR: Index out of bounds.");
+        exit(1);
+    }
+
+    size_t len = strlen(s);
+    if (len + sb->count > sb->capacity) sb_grow_until(sb, len);
+
+    memmove(&sb->content[index + len], &sb->content[index], sb->count - index);
+    memcpy(&sb->content[index], s, len);
+
+    sb->count += len;
 }
 
 void sb_delete(String_Builder *sb, size_t start, size_t end)
 {
-    return;
+    if (start >= sb->count || end >= sb->count) {
+        printf("ERROR: Index out of bounds.");
+        exit(1);
+    }
+
+    // I don't think this error is important enough to crash the program
+    // Maybe decide later
+    if (start > end) return;
+
+    if (end == sb->count - 1) {
+        sb->count = start;
+        sb->content[sb->count] = '\0';
+    } else {
+        memmove(&sb->content[start], &sb->content[end + 1], sb->count - end - 2);
+        sb->count -= end - start + 1;
+        sb->content[sb->count] = '\0';
+    }
 }
 
 void sb_replace(String_Builder *sb, size_t start, size_t end, char *s)
 {
-    return;
+    if (start >= sb->count || end >= sb->count) {
+        printf("ERROR: Index out of bounds.");
+        exit(1);
+    }
+
+    // I don't think this error is important enough to crash the program
+    // Maybe decide later
+    if (start > end) return;
+
+    size_t len = strlen(s);
+    size_t new_count = sb->count + len - (end - start + 1);
+    if (new_count > sb->capacity) {
+        sb_grow_until(sb, new_count - sb->count);
+    }
+
+
+    if (end == sb->count - 1) {
+        memcpy(&sb->content[start], s, len);
+        sb->content[new_count] = '\0';
+    } else {
+        memmove(&sb->content[start + len], &sb->content[end + 1], new_count - len);
+        memmove(&sb->content[start], s, len);
+        sb->content[new_count] = '\0';
+    }
+
+    sb->count = new_count;
 }
 
 // --------------------------------------
 // |     String View Implementation     |
 // --------------------------------------
+
+String_View sv_from_cstr(const char *data)
+{
+    String_View sv = {0};
+    sv.data = data;
+    sv.count = strlen(data);
+    return sv;
+}
+
+String_View sv_from_sb(String_Builder *sb)
+{
+    return (String_View) {
+        .data = sb->content,
+        .count = sb->count
+    };
+}
 
 String_View sv_trim_left(String_View sv)
 {
@@ -130,8 +233,8 @@ String_View sv_trim_right(String_View sv)
 {
     size_t count = 0;
 
-    for (size_t i = sv.count - 1; i >= 0; --i) {
-        if (!isspace(sv.data[i])) break;
+    for (size_t i = sv.count; i > 0; --i) {
+        if (!isspace(sv.data[i - 1])) break;
         count++;
     }
 
